@@ -22,7 +22,6 @@ class ConvModel(nn.Module):
         self.fc2 = nn.Linear(512, num_actions)
         self.opt = optim.Adam(self.parameters(), lr=0.00025)
 
-
     def forward(self, x):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
@@ -31,53 +30,38 @@ class ConvModel(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
+def setup_frame_stacking_and_resizing(env, w, h, num_stack=4):
+    buffer = np.zeros((num_stack, h, w), 'uint8')
+    frame = None
+    return env, buffer, frame, w, h, num_stack
 
-class FrameStackingAndResizingEnv:
-    def __init__(self, env, w, h, num_stack=4):
-        self.env = env
-        self.n = num_stack
-        self.w = w
-        self.h = h
+def preprocess_frame(max_frame, w, h):
+    Luminance_frame = rgb_to_luminance(max_frame).astype(np.uint8)
+    resized_frame = cv2.resize(Luminance_frame, dsize=(84, 84))
+    return resized_frame
 
-        self.buffer = np.zeros((num_stack, h, w), 'uint8')
-        self.frame = None
+def rgb_to_luminance(frame):
+    return 0.299 * frame[:, :, 0] + 0.587 * frame[:, :, 1] + 0.114 * frame[:, :, 2]
 
-    def _preprocess_frame(self, frame):
-        image = cv2.resize(frame, (self.w, self.h))
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-        return image
+def step_frame_stack(env, action, buffer, w, h, num_stack):
+    im, reward, done, info, _ = env.step(action)
+    frame = im.copy()
+    im = preprocess_frame(im, w, h)
+    buffer[1:num_stack, :, :] = buffer[0:num_stack-1, :, :]
+    buffer[0, :, :] = im
+    return buffer.copy(), reward, done, info, frame
 
-    def step(self, action):
-        im, reward, done, info, _ = self.env.step(action)
-        self.frame = im.copy()
-        im = self._preprocess_frame(im)
-        self.buffer[1:self.n, :, :] = self.buffer[0:self.n-1, :, :]
-        self.buffer[0, :, :] = im
-        return self.buffer.copy(), reward, done, info, _
+def render_frame_stack(env, mode, frame):
+    if mode == 'rgb_array':
+        return frame
+    return env.render(mode)
 
-    def render(self, mode):
-        if mode == 'rgb_array':
-            return self.frame
-        return super(FrameStackingAndResizingEnv, self).render(mode)
-
-    @property
-    def observation_space(self):
-        # gym.spaces.Box()
-        return np.zeros((self.n, self.h, self.w))
-
-    @property
-    def action_space(self):
-        return self.env.action_space
-
-    def reset(self):
-        im, _ = self.env.reset()
-        self.frame = im.copy()
-        im = self._preprocess_frame(im)
-        self.buffer = np.stack([im]*self.n, 0)
-        return self.buffer.copy()
-
-    def render(self, mode):
-        self.env.render(mode)
+def reset_frame_stack(env, buffer, w, h, num_stack):
+    im, _ = env.reset()
+    frame = im.copy()
+    im = preprocess_frame(im, w, h)
+    buffer = np.stack([im]*num_stack, 0)
+    return buffer.copy(), frame
 
 @dataclass
 class Sarsd:
@@ -104,10 +88,8 @@ class ReplayBuffer:
             return sample(self.buffer[: self.idx], num_samples)
         return sample(self.buffer, num_samples)
 
-
 def update_tgt_model(m, tgt):
     tgt.load_state_dict(m.state_dict())
-
 
 def train_step(model, state_transitions, tgt, num_actions, device, gamma=0.99):
     cur_states = torch.stack(([torch.Tensor(s.state) for s in state_transitions])).to(
@@ -179,12 +161,12 @@ def main(test=False, chkpt=None, device="cuda"):
     epochs_before_test = 1500
 
     env = gym.make('ALE/Breakout-v5', render_mode='rgb_array')
-    env = FrameStackingAndResizingEnv(env, 84, 84, 4)
+    env, buffer, frame, w, h, num_stack = setup_frame_stacking_and_resizing(env, 84, 84, 4)
 
     test_env = gym.make('ALE/Breakout-v5', render_mode='rgb_array')
-    test_env = FrameStackingAndResizingEnv(test_env, 84, 84, 4)
+    test_env, test_buffer, test_frame, _, _, _ = setup_frame_stacking_and_resizing(test_env, 84, 84, 4)
 
-    last_observation = env.reset()
+    last_observation, last_frame = reset_frame_stack(env, buffer, w, h, num_stack)
 
     m = ConvModel(env.action_space.n).to(device)
     if chkpt is not None:
@@ -206,7 +188,7 @@ def main(test=False, chkpt=None, device="cuda"):
     try:
         while True:
             if test:
-                env.render()
+                render_frame_stack(env, 'human', last_frame)
                 time.sleep(0.05)
             tq.update(1)
 
@@ -219,13 +201,11 @@ def main(test=False, chkpt=None, device="cuda"):
                 action = torch.distributions.Categorical(logits=logits).sample().item()
             else:
                 if random() < eps:
-                    action = (
-                        env.action_space.sample()
-                    )  # your agent here (this takes random actions)
+                    action = env.action_space.sample()  # Random action
                 else:
                     action = m(torch.Tensor(last_observation).unsqueeze(0).to(device)).max(-1)[-1].item()
 
-            observation, reward, done, info, _ = env.step(action)
+            observation, reward, done, info, frame = step_frame_stack(env, action, buffer, w, h, num_stack)
             rolling_reward += reward
 
             rb.insert(Sarsd(last_observation, action, reward, observation, done))
@@ -237,7 +217,7 @@ def main(test=False, chkpt=None, device="cuda"):
                 if test:
                     print(rolling_reward)
                 rolling_reward = 0
-                observation = env.reset()
+                observation, frame = reset_frame_stack(env, buffer, w, h, num_stack)
 
             steps_since_train += 1
             step_num += 1
@@ -258,7 +238,6 @@ def main(test=False, chkpt=None, device="cuda"):
 
                 if epochs_since_test > epochs_before_test:
                     rew, frames = run_test_episode(m, test_env, device)
-                    # T, H, W, C
                     epochs_since_test = 0
 
                 if epochs_since_tgt > tgt_model_update:
@@ -273,6 +252,7 @@ def main(test=False, chkpt=None, device="cuda"):
         pass
 
     env.close()
+
 
 if __name__ == "__main__":
     main()
