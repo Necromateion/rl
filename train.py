@@ -21,12 +21,13 @@ def select_action(state, steps_done, policy_net, num_actions, start_eps=INITIAL_
     sample = np.random.random()
     eps_threshold = end_eps + (start_eps - end_eps) * math.exp(-1. * steps_done / decay_duration)
 
-    if sample > eps_threshold:
+    if sample < eps_threshold:
+        return torch.tensor([[np.random.choice(num_actions)]], dtype=torch.long)        
+    else:
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2)
             return policy_net(state_tensor).max(1)[1].view(1, 1)
-    else:
-        return torch.tensor([[np.random.choice(num_actions)]], dtype=torch.long)
+        
 def compute_q_values(batch, policy_net, target_net):
     state_batch, action_batch, reward_batch, next_state_batch, done_batch = batch
 
