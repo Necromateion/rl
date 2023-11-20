@@ -53,10 +53,10 @@ def rgb_to_luminance(frame):
 def select_action(step_num, env, dqn_model, last_observation, device):
     eps = max(FINAL_EXPLORATION, (INITIAL_EXPLORATION - EPS_DECAY_RATE) ** max(1, step_num * step_num))
     if random() < eps:
-        action = env.action_space.sample()  
+        return env.action_space.sample(), False
     else:
-        action = dqn_model(torch.Tensor(last_observation).unsqueeze(0).to(device)).max(-1)[-1].item()
-    return action
+        return dqn_model(torch.Tensor(last_observation).unsqueeze(0).to(device)).max(-1)[-1].item(), True
+    
 
 def step_buffer_stack(env, action, buffer):
     im, reward, done, _, _ = env.step(action)
@@ -160,6 +160,7 @@ def main(device="cuda"):
     step_num = -REPLAY_START_SIZE
     episode_rewards = []
     episode_loss = []
+    DQN_actions = {}
     tmp_reward = 0
     tq = tqdm()
     max_priority = 1e-6
@@ -167,7 +168,12 @@ def main(device="cuda"):
         tq.update(1)
 
         if step_num % ACTION_REPEAT == 0:
-            action = select_action(step_num, env, dqn_model, last_observation, device)
+            action, DQN_action = select_action(step_num, env, dqn_model, last_observation, device)
+            if DQN_action:
+                if action not in DQN_actions:
+                    DQN_actions[action] = 1
+                else:
+                    DQN_actions[action] += 1
         observation, reward, done = step_buffer_stack(env, action, buffer)
         reward = np.clip(reward, -1, 1)
         tmp_reward += reward
@@ -191,12 +197,13 @@ def main(device="cuda"):
             max_priority = max(max_priority, max(new_priorities))
 
         if (step_num > 0 and steps_before_update > TARGET_NETWORK_UPDATE_FREQUENCY):
-            print(f"""step : {step_num}, eps : {0.999999 ** step_num}, loss_average: {np.mean(episode_loss)},avg_reward: {np.mean(episode_rewards)}, max_reward: {np.max(episode_rewards)}""")  
+            print(f"""step : {step_num}, eps : {0.999999 ** step_num},DQN_actions : {DQN_actions}, loss_average: {np.mean(episode_loss)},avg_reward: {np.mean(episode_rewards)}, max_reward: {np.max(episode_rewards)}""")  
             target_model.load_state_dict(dqn_model.state_dict())      
             if(np.mean(episode_rewards)) > 2:           
                 torch.save(target_model.state_dict(), f"models/{step_num}.pth")
             episode_rewards = []      
             episode_loss = []  
+            DQN_actions = {}
             steps_before_update = 0
 
     env.close()
