@@ -51,19 +51,20 @@ def rgb_to_luminance(frame):
     return 0.299 * frame[:, :, 0] + 0.587 * frame[:, :, 1] + 0.114 * frame[:, :, 2]
 
 def select_action(step_num, env, dqn_model, last_observation, device):
-    eps = max(FINAL_EXPLORATION, (INITIAL_EXPLORATION - EPS_DECAY_RATE) ** max(1, step_num * step_num))
+    #eps = max(FINAL_EXPLORATION, (INITIAL_EXPLORATION - EPS_DECAY_RATE) ** max(1, step_num * step_num))
+    eps = FINAL_EXPLORATION + (INITIAL_EXPLORATION - FINAL_EXPLORATION) * math.exp(-1. * max(1, step_num) / EPS_DECAY_RATE)
     if random() < eps:
         return env.action_space.sample(), False
     else:
-        return dqn_model(torch.Tensor(last_observation).unsqueeze(0).to(device)).max(-1)[-1].item(), True
+        return dqn_model(torch.Tensor(last_observation).unsqueeze(0).to(device)).max(1)[1].item(), True
     
 
 def step_buffer_stack(env, action, buffer):
-    im, reward, done, _, _ = env.step(action)
+    im, reward, done, _, info = env.step(action)
     im = preprocess_frame(im)
     buffer[1:4, :, :] = buffer[0:4-1, :, :]
     buffer[0, :, :] = im
-    return buffer, reward, done
+    return buffer, reward, done, info
 
 def reset_frame_stack(env, buffer):
     im, _ = env.reset()
@@ -164,6 +165,7 @@ def main(device="cuda"):
     tmp_reward = 0
     tq = tqdm()
     max_priority = 1e-6
+    lives = 5
     for _ in range(100000000):
         tq.update(1)
 
@@ -174,7 +176,7 @@ def main(device="cuda"):
                     DQN_actions[action] = 1
                 else:
                     DQN_actions[action] += 1
-        observation, reward, done = step_buffer_stack(env, action, buffer)
+        observation, reward, done, info = step_buffer_stack(env, action, buffer)
         reward = np.clip(reward, -1, 1)
         tmp_reward += reward
 
@@ -182,10 +184,16 @@ def main(device="cuda"):
         replay_buffer.insert(Sarsd(last_observation, action, reward, observation, done), error)
         last_observation = observation
 
+        
         if done:
-            episode_rewards.append(tmp_reward)
-            tmp_reward = 0
-            observation = reset_frame_stack(env, buffer)
+            if info["lives"] < lives:
+                lives -= 1
+            if lives <= 0:  
+                episode_rewards.append(tmp_reward)
+                tmp_reward = 0
+                observation = reset_frame_stack(env, buffer)
+                lives = 5  
+            
 
         steps_before_update += 1
         step_num += 1
